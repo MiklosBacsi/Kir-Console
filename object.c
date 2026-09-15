@@ -396,8 +396,10 @@ int main(int argc, char **argv) {
     float *zb = NULL;
     char *out = NULL;
     int out_cap = 0;
-    /* Slight nod so the thin extrusion reads as 3D without hiding the face. */
-    float A = 0.22f, B = 0.18f;
+    /* Fixed 15° back-tilt around X (screen-horizontal). Spin is around Y
+     * (vertical in this Y-up frame; Z-up in a left-handed Z-up frame). */
+    const float A = 15.0f * PI / 180.0f;
+    float B = 0.0f;
     int use_color;
     struct timespec frame_start, now, sleep_for;
 
@@ -506,23 +508,24 @@ int main(int argc, char **argv) {
         for (v = 0; v < nverts; v++) {
             float px = verts[v].x, py = verts[v].y, pz = verts[v].z;
             float nx = verts[v].nx, ny = verts[v].ny, nz = verts[v].nz;
-            float x1, y1, z1, ny1, nz1, nx1;
+            float x1, y1, z1, ny1, nz1;
             float x2, y2, z2, ny2, nz2;
             float z3, ooz, L, lit;
             int xp, yp, idx, shade;
 
-            y1 = py * cosA - pz * sinA;
-            z1 = py * sinA + pz * cosA;
-            x1 = px;
-            ny1 = ny * cosA - nz * sinA;
-            nz1 = ny * sinA + nz * cosA;
-            nx1 = nx;
+            /* Turntable spin around vertical Y, then tilt backwards around X
+             * so the 15° lean stays camera-relative. */
+            x1 = px * cosB + pz * sinB;
+            y1 = py;
+            z1 = -px * sinB + pz * cosB;
+            ny1 = ny;
+            nz1 = -nx * sinB + nz * cosB;
 
-            x2 = x1 * cosB + z1 * sinB;
-            y2 = y1;
-            z2 = -x1 * sinB + z1 * cosB;
-            ny2 = ny1;
-            nz2 = -nx1 * sinB + nz1 * cosB;
+            x2 = x1;
+            y2 = y1 * cosA - z1 * sinA;
+            z2 = y1 * sinA + z1 * cosA;
+            ny2 = ny1 * cosA - nz1 * sinA;
+            nz2 = ny1 * sinA + nz1 * cosA;
 
             z3 = z2 + K2;
             if (z3 <= 0.1f) {
@@ -597,11 +600,7 @@ int main(int argc, char **argv) {
         fwrite(out, 1, (size_t)out_len, stdout);
         fflush(stdout);
 
-        A += 0.012f;
         B += 0.035f;
-        if (A > 2.0f * PI) {
-            A -= 2.0f * PI;
-        }
         if (B > 2.0f * PI) {
             B -= 2.0f * PI;
         }
