@@ -4,22 +4,16 @@ LDFLAGS ?= -lm
 
 .PHONY: all run clean sample
 
-all: donut object
+all: Kir-Console
 
-donut: donut.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
-
-object: object.c stb_image.h
-	$(CC) $(CFLAGS) -o $@ object.c $(LDFLAGS)
+Kir-Console: Kir-Console.c stb_image.h
+	$(CC) $(CFLAGS) -o $@ Kir-Console.c $(LDFLAGS)
 
 sample.png: make_sample.py
 	python3 make_sample.py
 
-run: donut
-	./donut
-
-run-object: object
-	./object Kir-Dev-White.png
+run-Kir-Console: Kir-Console
+	./Kir-Console Kir-Dev-White.png
 
 clean:
-	rm -f donut object
+	rm -f Kir-Console
