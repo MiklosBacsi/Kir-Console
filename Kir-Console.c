@@ -5,8 +5,8 @@
  * opaque pixels, then shades it with the same single directional light as
  * donut.c. Logo colors are kept and dimmed by the lighting.
  *
- * Build:  make object
- * Run:    ./object [path.png]
+ * Build:  make
+ * Run:    ./Kir-Console [path.png] [--tilt degrees]
  * Quit:   Ctrl+C
  *
  * Defaults to Kir-Dev-White.png if present.
@@ -17,6 +17,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include <errno.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -27,8 +28,18 @@
 #include <unistd.h>
 
 #define PI 3.14159265358979323846f
-#define PALETTE ".,-~:;=!*#$@"
-#define PALETTE_LEN 12
+/* Dark to bright, in the usual ASCII density order. Twenty-four steps
+ * fill the gap between the sparse glyphs and the solid ones. */
+static const char PALETTE[] = ".`,;!~-1trncYC0mpka*M&%$";
+enum { PALETTE_LEN = (int)(sizeof(PALETTE) - 1) };
+_Static_assert(PALETTE_LEN == 24, "shade ramp length");
+/* 4x4 Bayer thresholds in (0, 1). A fraction of 0 never promotes. */
+static const float BAYER4[4][4] = {
+    {0.5f / 16.0f, 8.5f / 16.0f, 2.5f / 16.0f, 10.5f / 16.0f},
+    {12.5f / 16.0f, 4.5f / 16.0f, 14.5f / 16.0f, 6.5f / 16.0f},
+    {3.5f / 16.0f, 11.5f / 16.0f, 1.5f / 16.0f, 9.5f / 16.0f},
+    {15.5f / 16.0f, 7.5f / 16.0f, 13.5f / 16.0f, 5.5f / 16.0f},
+};
 #define TARGET_FPS 30
 #define FRAME_NS (1000000000L / TARGET_FPS)
 
@@ -368,19 +379,62 @@ static Vert *build_mesh(const unsigned char *occ, const unsigned char *rgb,
     return verts;
 }
 
-static const char *pick_path(int argc, char **argv) {
-    static const char *defaults[] = {"Kir-Dev-White.png", "object.png",
-                                     "sample.png", NULL};
+static const char *default_path(void) {
+    static const char *defaults[] = {"Kir-Dev-White.png", "Kir-25.png",
+                                     "Simonyi.png", NULL};
     int i;
-    if (argc >= 2) {
-        return argv[1];
-    }
     for (i = 0; defaults[i]; i++) {
         if (access(defaults[i], R_OK) == 0) {
             return defaults[i];
         }
     }
     return NULL;
+}
+
+static int parse_degrees(const char *s, float *out) {
+    char *end = NULL;
+    float v;
+    if (!s || !s[0]) {
+        return -1;
+    }
+    errno = 0;
+    v = strtof(s, &end);
+    if (errno != 0 || end == s || *end != '\0') {
+        return -1;
+    }
+    *out = v;
+    return 0;
+}
+
+/* Image path is the optional positional argument. --tilt N sets the
+ * back-tilt in degrees. The default tilt is 10. */
+static int parse_args(int argc, char **argv, const char **path, float *tilt_deg) {
+    int i;
+    *path = NULL;
+    *tilt_deg = 10.0f;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--tilt") == 0) {
+            if (i + 1 >= argc || parse_degrees(argv[i + 1], tilt_deg) != 0) {
+                fprintf(stderr, "usage: --tilt N  (N is the tilt in degrees)\n");
+                return -1;
+            }
+            i++;
+            continue;
+        }
+        if (argv[i][0] == '-') {
+            fprintf(stderr, "unknown option '%s'\n", argv[i]);
+            return -1;
+        }
+        if (*path) {
+            fprintf(stderr, "extra argument '%s'\n", argv[i]);
+            return -1;
+        }
+        *path = argv[i];
+    }
+    if (!*path) {
+        *path = default_path();
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -396,22 +450,27 @@ int main(int argc, char **argv) {
     float *zb = NULL;
     char *out = NULL;
     int out_cap = 0;
-    /* Fixed 15° back-tilt around X (screen-horizontal). Spin is around Y
+    /* Back-tilt around X (screen-horizontal). Spin is around Y
      * (vertical in this Y-up frame; Z-up in a left-handed Z-up frame). */
-    const float A = 15.0f * PI / 180.0f;
+    float tilt_deg = 10.0f;
+    float A;
     float B = 0.0f;
     int use_color;
     struct timespec frame_start, now, sleep_for;
 
-    path = pick_path(argc, argv);
+    if (parse_args(argc, argv, &path, &tilt_deg) != 0) {
+        return 1;
+    }
     if (!path) {
         fprintf(stderr,
-                "usage: %s [image.png]\n"
+                "usage: %s [image.png] [--tilt degrees]\n"
                 "  PNG with a transparent background (preferred).\n"
-                "  Defaults to Kir-Dev-White.png if it is in the current directory.\n",
+                "  Defaults to Kir-Dev-White.png if it is in the current directory.\n"
+                "  --tilt sets the back-tilt in degrees (default 10).\n",
                 argv[0]);
         return 1;
     }
+    A = tilt_deg * PI / 180.0f;
 
     occ = load_silhouette(path, &gw, &gh, &rgb);
     if (!occ) {
@@ -510,11 +569,11 @@ int main(int argc, char **argv) {
             float nx = verts[v].nx, ny = verts[v].ny, nz = verts[v].nz;
             float x1, y1, z1, ny1, nz1;
             float x2, y2, z2, ny2, nz2;
-            float z3, ooz, L, lit;
+            float z3, ooz, L, nd, eased, shade_f, frac, lit;
             int xp, yp, idx, shade;
 
             /* Turntable spin around vertical Y, then tilt backwards around X
-             * so the 15° lean stays camera-relative. */
+             * so the lean stays camera-relative. */
             x1 = px * cosB + pz * sinB;
             y1 = py;
             z1 = -px * sinB + pz * cosB;
@@ -549,11 +608,26 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            shade = (int)(L * 8.0f);
+            /* One eased light, so a face still fades smoothly as it turns.
+             * Walls sit halfway between the cap and the darker rim band,
+             * so the edge reads as a separate face without going black.
+             * Bayer mixes the two glyphs around the fractional step. */
+            nd = fminf(L * 0.70710678f, 1.0f);
+            eased = powf(nd, 0.6f);
+            shade_f = eased * (float)(PALETTE_LEN - 1);
+            lit = 0.34f + 0.66f * eased;
+            if (fabsf(nz) <= 0.5f) {
+                shade_f = 0.5f * (shade_f + eased * 7.0f);
+                lit = 0.5f * (lit + 0.06f + 0.24f * eased);
+            }
+            shade = (int)shade_f;
+            frac = shade_f - (float)shade;
+            if (frac > BAYER4[yp & 3][xp & 3]) {
+                shade++;
+            }
             if (shade >= PALETTE_LEN) {
                 shade = PALETTE_LEN - 1;
             }
-            lit = 0.20f + 0.80f * (L > 1.414f ? 1.0f : L / 1.414f);
             zb[idx] = ooz;
             fb[idx] = PALETTE[shade];
             col[idx * 3 + 0] = (unsigned char)(verts[v].r * lit + 0.5f);
